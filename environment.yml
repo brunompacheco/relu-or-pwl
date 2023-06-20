@@ -1,0 +1,12 @@
+name: relu
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - jax
+  - jaxlib
+  - cuda-nvcc
+  - ipykernel
+  - optax
+  - matplotlib
+  - pandas

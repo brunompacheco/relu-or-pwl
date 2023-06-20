@@ -15,7 +15,7 @@ def load_riser_data(fpath):
     # filter only relevant info
     df = df[['psup', 'rgl', 'bsw', 'qliq', 'delta_p']]
 
-    return df
+    return df.round(6)
 
 def split_curve(df: pd.DataFrame, reduction_ratio=1/2) -> pd.DataFrame:
     var_names = ['psup', 'rgl', 'bsw', 'qliq']

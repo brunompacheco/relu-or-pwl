@@ -41,6 +41,6 @@ def get_X_y(df: pd.DataFrame):
     target_name = 'delta_p'
 
     X = df[var_names].values
-    y = df[target_name].values
+    y = df[target_name].values.reshape(-1,1)
 
     return X, y

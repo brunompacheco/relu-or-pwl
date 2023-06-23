@@ -8,19 +8,6 @@ from jax import value_and_grad, jit, vmap, nn, random
 from jax.random import PRNGKey
 
 
-def _compile_NN_predict(net):
-    # I tried making NeuralNetwork picklable, but failed :(
-
-    # global compiled_predict
-    def compiled_predict(x):
-        return net._predict_from_params(
-            x, net.Wbs_,
-            input_range=net.input_range_,
-            output_range=net.output_range_,
-        )
-
-    return jit(vmap(compiled_predict))
-
 class NeuralNetwork(BaseEstimator,RegressorMixin):
     def __init__(self, h_layers=3, h_units=20, optimizer=optax.adam,
                  loss_fn=optax.l2_loss, epochs=100, learning_rate=1e-3,
@@ -76,8 +63,7 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
 
         X = check_array(X)
 
-        X_ = jnp.array(X)
-        y_hat = self._predict(X_)
+        y_hat = self._predict(X)
 
         if self.n_features_out_ == 0:
             return y_hat.flatten()
@@ -122,21 +108,12 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
         return jit(compute_mean_loss)
 
     def fit(self, X, y, X_val=None, y_val=None):
-        X, y = check_X_y(X, y)
-
-        try:
-            X_ = jnp.array(X)
-            y_ = jnp.array(y)
-        except TypeError:
-            X_ = jnp.array(X.astype(float))
-            y_ = jnp.array(y.astype(float))
-        
-        y_ = y_.reshape(y_.shape[0], -1)
+        X, y = check_X_y(X, y, multi_output=True, y_numeric=True)
 
         if not (self.warm_start and hasattr(self, 'Wbs_')):
             # initialize weights and biases
-            self.n_features_in_ = X_.shape[1]
-            self.n_features_out_ = y_.shape[1]
+            self.n_features_in_ = X.shape[1]
+            self.n_features_out_ = y.shape[1]
 
             self._initialize_weights_and_biases([
                 self.n_features_in_,
@@ -145,27 +122,29 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
             ])
 
         # fit scaler to data
-        self.input_range_ = jnp.stack([X_.min(0), X_.max(0)])
-        self.output_range_ = jnp.stack([y_.min(0), y_.max(0)])
+        self.input_range_ = jnp.stack([X.min(0), X.max(0)])
+        self.output_range_ = jnp.stack([y.min(0), y.max(0)])
 
-        # TRAIN
+        # initialize optimizer
         optimizer = self.optimizer(learning_rate=self.learning_rate)
         opt_state = optimizer.init(self.Wbs_)
+        
+        # compile training and validation steps, for faster training
         step = self.compile_training_step(optimizer)
-
         if (X_val is not None) and (y_val is not None):
             assert len(X_val.shape) == 2, 'expects `X` to have shape (n_samples, n_feats)'
             val_step = self.compile_validation_step()
         else:
             val_step = None
 
+        # TRAIN
         self.train_loss_values_ = list()
         self.val_loss_values_ = list()
         for _ in range(self.epochs):
             self.Wbs_, opt_state, loss_value = step(self.Wbs_,
                                                     self.input_range_,
                                                     self.output_range_,
-                                                    opt_state, X_, y_)
+                                                    opt_state, X, y)
             self.train_loss_values_.append(loss_value)
 
             if val_step is not None:
@@ -173,6 +152,12 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
                                           self.output_range_, X_val, y_val)
                 self.val_loss_values_.append(val_loss_value)
 
-        self._predict = _compile_NN_predict(self)
+        # compile predict function, for faster inference
+        # TODO: lazy compilation
+        self._predict = jit(vmap(lambda x: self._predict_from_params(
+            x, self.Wbs_,
+            input_range=self.input_range_,
+            output_range=self.output_range_,
+        )))
 
-        return self
+        return  self

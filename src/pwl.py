@@ -139,17 +139,16 @@ class PWL():
             # faces of the hypercube of breakpoints that enclose the input
             try:
                 x_i_L = x_i_breakpoints[x_i_breakpoints <= x[i]][-1]
-                x_i_H = x_i_breakpoints[x_i_breakpoints > x[i]][0]
+                x_i_H = x_i_breakpoints[x_i_breakpoints >= x[i]][0]
             except IndexError:
-                try:
-                    x_i_L = x_i_breakpoints[x_i_breakpoints < x[i]][-1]
-                    x_i_H = x_i_breakpoints[x_i_breakpoints >= x[i]][0]
-                except IndexError:
-                    return np.nan, np.nan
+                return np.nan, np.nan
             hypercube_limits.append([x_i_L, x_i_H])
 
             # relative position of the input with respect to the hypercube's faces
-            eta.append((x[i] - x_i_L) / (x_i_H - x_i_L))
+            if x_i_L == x_i_H:
+                eta.append(0.)
+            else:
+                eta.append((x[i] - x_i_L) / (x_i_H - x_i_L))
 
         hypercube_limits = np.array(hypercube_limits)
         return hypercube_limits, eta

@@ -18,9 +18,9 @@ def load_riser_data(fpath):
     return df.round(6)
 
 def split_curve(df: pd.DataFrame, reduction_ratio=1/2) -> pd.DataFrame:
-    var_names = ['psup', 'rgl', 'bsw', 'qliq']
+    var_names = ['bsw', 'rgl', 'qliq', 'psup']
 
-    df_train = df.copy()
+    df_train = df.copy().sort_values(by=var_names[::-1])
     df_test = df_train.copy()
     var_values_train = dict()
     for var in var_names:
@@ -37,7 +37,7 @@ def split_curve(df: pd.DataFrame, reduction_ratio=1/2) -> pd.DataFrame:
     return df_train, df_test
 
 def get_X_y(df: pd.DataFrame):
-    var_names = ['psup', 'rgl', 'bsw', 'qliq']
+    var_names = ['bsw', 'rgl', 'qliq', 'psup']
     target_name = 'delta_p'
 
     X = df[var_names].values

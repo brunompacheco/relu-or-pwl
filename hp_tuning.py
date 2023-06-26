@@ -23,9 +23,9 @@ if __name__ == '__main__':
         results = list()
 
     hp_ranges = {
-        'h_layers': [2, 3, 5, 10],
-        'h_units': [5, 10, 20, 50, 100, 200],
-        'learning_rate': [1e-1, 1e-2, 1e-3],
+        'h_layers': [2, 5, 10, 20],
+        'h_units': [20, 50, 200, 500],
+        'learning_rate': [1e-2, 1e-3, 1e-4],
     }
 
     # load data
@@ -60,7 +60,8 @@ if __name__ == '__main__':
                 random_key=key
             )
 
-            net.fit(X_train, y_train, X_val=X_test, y_val=y_test)
+            net.fit(X_train, y_train, X_val=X_test, y_val=y_test,
+                    wandb_project='relu-pwl', wandb_group='hp-tuning-2',)
 
             val_results.append(net.val_loss_values_[-1])
             train_results.append(net.train_loss_values_[-1])

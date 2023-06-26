@@ -1,3 +1,4 @@
+import os
 import pickle
 import jax.numpy as jnp
 import optax
@@ -130,6 +131,13 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
 
     def _maybe_finish_wandb(self):
         try:
+            # upload model to wandb
+            tmp_file_fpath = self._wandb_run.name+'.pkl'
+            self.save(tmp_file_fpath)
+            self._wandb_run.save(tmp_file_fpath)
+            os.remove(tmp_file_fpath)
+
+            # finish wandb
             self._wandb_run.finish()
         except AttributeError:
             pass  # wandb was not initialized :shrug:
@@ -179,7 +187,6 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
                 epoch_log['val_loss'] = val_loss_value
             
             self._maybe_log_to_wandb(epoch_log)
-        self._maybe_finish_wandb()
 
         # compile predict function, for faster inference
         # TODO: lazy compilation
@@ -188,6 +195,8 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
             input_range=self.input_range_,
             output_range=self.output_range_,
         )))
+
+        self._maybe_finish_wandb()
 
         return  self
 

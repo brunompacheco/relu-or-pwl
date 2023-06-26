@@ -1,3 +1,4 @@
+import pickle
 import jax.numpy as jnp
 import optax
 
@@ -161,3 +162,45 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
         )))
 
         return  self
+
+    def save(self, fpath):
+        check_is_fitted(self)
+
+        with open(fpath, 'wb') as f:
+            pickle.dump(dict(
+                Wbs_=self.Wbs_,
+                input_range_=self.input_range_,
+                output_range_=self.output_range_,
+                train_loss_values_=self.train_loss_values_,
+                val_loss_values_=self.train_loss_values_,
+                n_features_in_=self.n_features_in_,
+                n_features_out_=self.n_features_out_,
+                **self.get_params()
+            ), f)
+
+    @classmethod
+    def load(cls, fpath):
+        self = cls()
+        with open(fpath, 'rb') as f:
+            all_params = pickle.load(f)
+        # npzfile = jnp.load(fpath)
+
+        self.set_params(**{k: v for k, v in all_params.items() if not k.endswith('_')})
+
+        # "fits" the model
+        self.Wbs_ = all_params['Wbs_']
+        self.input_range_ = all_params['input_range_']
+        self.output_range_ = all_params['output_range_']
+        self.train_loss_values_ = all_params['train_loss_values_']
+        self.val_loss_values_ = all_params['val_loss_values_']
+        self.n_features_in_ = all_params['n_features_in_']
+        self.n_features_out_ = all_params['n_features_out_']
+
+        # compile prediction
+        self._predict = jit(vmap(lambda x: self._predict_from_params(
+            x, self.Wbs_,
+            input_range=self.input_range_,
+            output_range=self.output_range_,
+        )))
+
+        return self

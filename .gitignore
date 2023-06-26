@@ -196,3 +196,4 @@ pyrightconfig.json
 
 data/
 models/
+wandb/

@@ -1,6 +1,7 @@
 import pickle
 import jax.numpy as jnp
 import optax
+import wandb
 
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils import check_array, check_X_y
@@ -108,28 +109,48 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
 
         return jit(compute_mean_loss)
 
-    def fit(self, X, y, X_val=None, y_val=None):
+    def _maybe_init_wandb(self, wandb_kwargs: dict):
+        if wandb_kwargs:
+            run = wandb.init(**wandb_kwargs)
+
+            for k, v in self.get_params().items():
+                run.config[k] = v
+            run.config['n_data_points'] = self.n_data_points_
+            run.config['n_features'] = self.n_features_in_
+            run.config['input_range'] = self.input_range_
+            run.config['output_range'] = self.output_range_
+
+            self._wandb_run = run
+
+    def _maybe_log_to_wandb(self, epoch_log: dict, step=None, commit=None):
+        try:
+            self._wandb_run.log(epoch_log, step=step, commit=commit)
+        except AttributeError:
+            pass  # wandb was not initialized :shrug:
+
+    def _maybe_finish_wandb(self):
+        try:
+            self._wandb_run.finish()
+        except AttributeError:
+            pass  # wandb was not initialized :shrug:
+
+    def fit(self, X, y, X_val=None, y_val=None, **kwargs):
+        """Keyword arguments to be passed to W&B should be prefixed with
+        `wandb_`, e.g., `wandb_project='project-name'` will become
+        `wandb.init(project='project-name')`.
+        """
         X, y = check_X_y(X, y, multi_output=True, y_numeric=True)
 
         if not (self.warm_start and hasattr(self, 'Wbs_')):
-            # initialize weights and biases
-            self.n_features_in_ = X.shape[1]
-            self.n_features_out_ = y.shape[1]
+            self._fit_to_Xy_shape(X, y)
 
-            self._initialize_weights_and_biases([
-                self.n_features_in_,
-                *([self.h_units,]*self.h_layers),
-                self.n_features_out_ if self.n_features_out_ > 0 else 1
-            ])
-
-        # fit scaler to data
-        self.input_range_ = jnp.stack([X.min(0), X.max(0)])
-        self.output_range_ = jnp.stack([y.min(0), y.max(0)])
+        self._maybe_init_wandb({k[len('wandb_'):]:v for k,v in kwargs.items()
+                                if k.startswith('wandb_')})
 
         # initialize optimizer
         optimizer = self.optimizer(learning_rate=self.learning_rate)
         opt_state = optimizer.init(self.Wbs_)
-        
+
         # compile training and validation steps, for faster training
         step = self.compile_training_step(optimizer)
         if (X_val is not None) and (y_val is not None):
@@ -138,20 +159,27 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
         else:
             val_step = None
 
-        # TRAIN
         self.train_loss_values_ = list()
         self.val_loss_values_ = list()
-        for _ in range(self.epochs):
+        for _ in range(self.epochs):  # TRAINING LOOP
             self.Wbs_, opt_state, loss_value = step(self.Wbs_,
                                                     self.input_range_,
                                                     self.output_range_,
                                                     opt_state, X, y)
             self.train_loss_values_.append(loss_value)
 
+            epoch_log = {
+                'opt_state': opt_state,
+                'train_loss': loss_value,
+            }
             if val_step is not None:
                 val_loss_value = val_step(self.Wbs_, self.input_range_,
                                           self.output_range_, X_val, y_val)
                 self.val_loss_values_.append(val_loss_value)
+                epoch_log['val_loss'] = val_loss_value
+            
+            self._maybe_log_to_wandb(epoch_log)
+        self._maybe_finish_wandb()
 
         # compile predict function, for faster inference
         # TODO: lazy compilation
@@ -162,6 +190,22 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
         )))
 
         return  self
+
+    def _fit_to_Xy_shape(self, X, y):
+        # initialize weights and biases
+        self.n_data_points_ = X.shape[0]
+        self.n_features_in_ = X.shape[1]
+        self.n_features_out_ = y.shape[1]
+
+        # fit scaler to data
+        self.input_range_ = jnp.stack([X.min(0), X.max(0)])
+        self.output_range_ = jnp.stack([y.min(0), y.max(0)])
+
+        self._initialize_weights_and_biases([
+            self.n_features_in_,
+            *([self.h_units,]*self.h_layers),
+            self.n_features_out_ if self.n_features_out_ > 0 else 1
+        ])
 
     def save(self, fpath):
         check_is_fitted(self)

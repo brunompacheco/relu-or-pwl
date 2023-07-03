@@ -132,17 +132,17 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
     def _maybe_finish_wandb(self):
         try:
             # upload model to wandb
-            tmp_file_fpath = self._wandb_run.name+'.pkl'
+            tmp_file_fpath = 'models/'+self._wandb_run.name+'.pkl'
             self.save(tmp_file_fpath)
             self._wandb_run.save(tmp_file_fpath)
-            os.remove(tmp_file_fpath)
+            # os.remove(tmp_file_fpath)
 
             # finish wandb
             self._wandb_run.finish()
         except AttributeError:
             pass  # wandb was not initialized :shrug:
 
-    def fit(self, X, y, X_val=None, y_val=None, **kwargs):
+    def fit(self, X, y, X_val=None, y_val=None, bandit: int = jnp.inf, **kwargs):
         """Keyword arguments to be passed to W&B should be prefixed with
         `wandb_`, e.g., `wandb_project='project-name'` will become
         `wandb.init(project='project-name')`.
@@ -169,7 +169,9 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
 
         self.train_loss_values_ = list()
         self.val_loss_values_ = list()
-        for _ in range(self.epochs):  # TRAINING LOOP
+        best_val = jnp.inf
+        best_val_epoch = -1
+        for epoch in range(self.epochs):  # TRAINING LOOP
             self.Wbs_, opt_state, loss_value = step(self.Wbs_,
                                                     self.input_range_,
                                                     self.output_range_,
@@ -185,7 +187,14 @@ class NeuralNetwork(BaseEstimator,RegressorMixin):
                                           self.output_range_, X_val, y_val)
                 self.val_loss_values_.append(val_loss_value)
                 epoch_log['val_loss'] = val_loss_value
-            
+
+                if val_loss_value < 0.95 * best_val:
+                    best_val = val_loss_value
+                    best_val_epoch = epoch
+                elif epoch - best_val_epoch > bandit:
+                    # ensure that _maybe_log_to_wandb runs one last time
+                    epoch = self.epochs + 1
+
             self._maybe_log_to_wandb(epoch_log)
 
         # compile predict function, for faster inference

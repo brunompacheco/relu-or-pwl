@@ -15,7 +15,7 @@ EPOCHS = 5000
 
 
 if __name__ == '__main__':
-    results_fpath = Path('medium_nn_hp_tuning_results.pkl')
+    results_fpath = Path('medium_nn_hp_tuning_2_results.pkl')
     if results_fpath.exists():
         with open(results_fpath, 'rb') as f:
             results = pickle.load(f)
@@ -60,7 +60,7 @@ if __name__ == '__main__':
                 random_key=key
             )
 
-            net.fit(X_train, y_train, X_val=X_test, y_val=y_test,
+            net.fit(X_train, y_train, X_val=X_test, y_val=y_test, bandit=1000,
                     wandb_project='relu-pwl', wandb_group='hp-tuning-2',)
 
             val_results.append(net.val_loss_values_[-1])

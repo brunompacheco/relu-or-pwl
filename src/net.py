@@ -134,6 +134,135 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
 
         return jit(compute_mean_loss)
 
+    def _shuffle_data(self, X, y):
+        key = PRNGKey(self.random_key)
+        idx = jnp.arange(X.shape[0])
+        shuffled_idx = random.shuffle(key, idx)
+
+        return X[shuffled_idx], y[shuffled_idx]
+
+    def fit(self, X, y, X_val=None, y_val=None, bandit: int = jnp.inf, **kwargs):
+        """Keyword arguments to be passed to W&B should be prefixed with
+        `wandb_`, e.g., `wandb_project='project-name'` will become
+        `wandb.init(project='project-name')`.
+        """
+        X_, y_ = check_X_y(X, y, multi_output=True, y_numeric=True)
+
+        X_, y_, step, val_step = self._initialize(X_, y_, X_val, y_val, **kwargs)
+
+        self.train_loss_values_ = list()
+        self.val_loss_values_ = list()
+        best_val = jnp.inf
+        best_val_epoch = -1
+        for self.curr_epoch_ in range(self.epochs):  # TRAINING LOOP
+            self._run_epoch(X_, y_, X_val, y_val, bandit, step, val_step,
+                            best_val, best_val_epoch)
+
+        self._finish_fit()
+
+        return self
+
+    def _initialize(self, X, y, X_val, y_val, **kwargs):
+        if not (self.warm_start and hasattr(self, 'train_state_')):
+            self._fit_to_Xy_shape(X, y)
+            self._initialize_net_and_train_state(X)
+        else:
+            raise NotImplementedError('warm-starting :(')
+
+        X, y = self._shuffle_data(X, y)
+
+        # compile training and validation steps, for faster training
+        step = self.compile_training_step()
+        if (X_val is not None) and (y_val is not None):
+            assert len(X_val.shape) == 2, 'expects `X` to have shape (n_samples, n_feats)'
+            val_step = self.compile_validation_step()
+        else:
+            val_step = None
+
+        return X, y, step, val_step
+
+    def _run_epoch(self, X_, y_, X_val, y_val, bandit, step, val_step, best_val,
+                   best_val_epoch):
+        self.train_state_, loss_value = step(self.train_state_, X_, y_)
+        self.train_loss_values_.append(loss_value)
+
+        if val_step is not None:
+            val_loss_value = val_step(self.train_state_, X_val, y_val)
+            self.val_loss_values_.append(val_loss_value)
+
+            if val_loss_value < 0.95 * best_val:
+                best_val = val_loss_value
+                best_val_epoch = self.curr_epoch_
+            elif self.curr_epoch_ - best_val_epoch > bandit:
+                # ugly way to ensure that _maybe_log_to_wandb runs one last
+                # time
+                self.curr_epoch_ = self.epochs + 1
+        else:
+            val_loss_value = None
+
+        return loss_value, val_loss_value
+
+    def _finish_fit(self):
+        self._compile_predict()
+
+    def _compile_predict(self):
+        self._predict = jit(lambda x: self.train_state_.apply_fn(
+            {'params': self.train_state_.params}, x
+        ))
+
+    def _fit_to_Xy_shape(self, X, y):
+        # initialize weights and biases
+        self.n_data_points_ = X.shape[0]
+        self.n_features_in_ = X.shape[1]
+        self.n_features_out_ = y.shape[1]
+
+        # fit scaler to data
+        self.input_range_ = jnp.stack([X.min(0), X.max(0)])
+        self.output_range_ = jnp.stack([y.min(0), y.max(0)])
+
+    def save(self, fpath):
+        check_is_fitted(self)
+
+        with open(fpath, 'wb') as f:
+            # unpicklable
+            attributes = {v: getattr(self, v) for v in vars(self) if v.endswith('_')}
+            train_state = attributes.pop('train_state_')
+            attributes.pop('net_')
+
+            pickle.dump(dict(
+                __state_dict=to_state_dict(train_state),
+                **attributes,
+                **self.get_params()
+            ), f)
+
+    @classmethod
+    def load(cls, fpath):
+        self = cls()
+        with open(fpath, 'rb') as f:
+            all_params = pickle.load(f)
+
+        # only non-param in dict
+        state_dict = all_params.pop('__state_dict')
+
+        # load (hyper-)parameters
+        self.set_params(**{k: v for k, v in all_params.items() if not k.endswith('_')})
+
+        # "fits"
+        for k, v in all_params.items():
+            if k.endswith('_'):
+                setattr(self, k, v)
+
+        # load weights
+        self._initialize_net_and_train_state(jnp.ones((self.n_data_points_,
+                                                       self.n_features_in_)))
+
+        self.train_state_ = from_state_dict(self.train_state_, state_dict)
+
+        self._compile_predict()
+
+        return self
+
+class NetworkTrainerWandB(NetworkTrainer):
     def _maybe_init_wandb(self, wandb_kwargs: dict):
         if wandb_kwargs:
             run = wandb.init(**wandb_kwargs)
@@ -165,140 +294,29 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
             self._wandb_run.finish()
         except AttributeError:
             pass  # wandb was not initialized :shrug:
-        
-    def _shuffle_data(self, X, y):
-        key = PRNGKey(self.random_key)
-        idx = jnp.arange(X.shape[0])
-        shuffled_idx = random.shuffle(key, idx)
-
-        return X[shuffled_idx], y[shuffled_idx]
-
-    def fit(self, X, y, X_val=None, y_val=None, bandit: int = jnp.inf, **kwargs):
-        """Keyword arguments to be passed to W&B should be prefixed with
-        `wandb_`, e.g., `wandb_project='project-name'` will become
-        `wandb.init(project='project-name')`.
-        """
-        X_, y_ = check_X_y(X, y, multi_output=True, y_numeric=True)
-
-        X_, y_, step, val_step = self._initialize(X_, y_, X_val, y_val, **kwargs)
-
-        self.train_loss_values_ = list()
-        self.val_loss_values_ = list()
-        best_val = jnp.inf
-        best_val_epoch = -1
-        for epoch in range(self.epochs):  # TRAINING LOOP
-            self._run_epoch(X_, y_, X_val, y_val, bandit, step, val_step,
-                            best_val, best_val_epoch, epoch)
-
-        self._finish_fit()
-
-        return self
 
     def _initialize(self, X, y, X_val, y_val, **kwargs):
-        if not (self.warm_start and hasattr(self, 'train_state_')):
-            self._fit_to_Xy_shape(X, y)
-            self._initialize_net_and_train_state(X)
-        else:
-            raise NotImplementedError('warm-starting :(')
-
-        X, y = self._shuffle_data(X, y)
+        r = super()._initialize(X, y, X_val, y_val, **kwargs)
 
         self._maybe_init_wandb({k[len('wandb_'):]:v for k,v in kwargs.items()
                                 if k.startswith('wandb_')})
 
-        # compile training and validation steps, for faster training
-        step = self.compile_training_step()
-        if (X_val is not None) and (y_val is not None):
-            assert len(X_val.shape) == 2, 'expects `X` to have shape (n_samples, n_feats)'
-            val_step = self.compile_validation_step()
-        else:
-            val_step = None
-
-        return X, y, step, val_step
+        return r
 
     def _run_epoch(self, X_, y_, X_val, y_val, bandit, step, val_step, best_val,
-                   best_val_epoch, current_epoch):
-        self.train_state_, loss_value = step(self.train_state_, X_, y_)
-        self.train_loss_values_.append(loss_value)
+                   best_val_epoch):
+        loss_value, val_loss_value = super()._run_epoch(X_, y_, X_val, y_val,
+                                                        bandit, step, val_step,
+                                                        best_val, best_val_epoch)
 
-        epoch_log = {
-            'train_loss': loss_value,
-        }
+        self._maybe_log_to_wandb({'train_loss': loss_value,
+                                  'val_loss': val_loss_value,})
 
-        if val_step is not None:
-            val_loss_value = val_step(self.train_state_, X_val, y_val)
-            self.val_loss_values_.append(val_loss_value)
-            epoch_log['val_loss'] = val_loss_value
-
-            if val_loss_value < 0.95 * best_val:
-                best_val = val_loss_value
-                best_val_epoch = current_epoch
-            elif current_epoch - best_val_epoch > bandit:
-                    # ugly way to ensure that _maybe_log_to_wandb runs one last
-                    # time
-                current_epoch = self.epochs + 1
-
-        self._maybe_log_to_wandb(epoch_log)
+        return loss_value, val_loss_value
 
     def _finish_fit(self):
-        self._compile_predict()
+        r = super()._finish_fit()
 
         self._maybe_finish_wandb()
 
-    def _compile_predict(self):
-        self._predict = jit(lambda x: self.train_state_.apply_fn(
-            {'params': self.train_state_.params}, x
-        ))
-
-    def _fit_to_Xy_shape(self, X, y):
-        # initialize weights and biases
-        self.n_data_points_ = X.shape[0]
-        self.n_features_in_ = X.shape[1]
-        self.n_features_out_ = y.shape[1]
-
-        # fit scaler to data
-        self.input_range_ = jnp.stack([X.min(0), X.max(0)])
-        self.output_range_ = jnp.stack([y.min(0), y.max(0)])
-
-    def save(self, fpath):
-        check_is_fitted(self)
-
-        with open(fpath, 'wb') as f:
-            pickle.dump(dict(
-                __state_dict=to_state_dict(self.train_state_),
-                input_range_=self.input_range_,
-                output_range_=self.output_range_,
-                train_loss_values_=self.train_loss_values_,
-                val_loss_values_=self.train_loss_values_,
-                n_data_points_=self.n_data_points_,
-                n_features_in_=self.n_features_in_,
-                n_features_out_=self.n_features_out_,
-                **self.get_params()
-            ), f)
-
-    @classmethod
-    def load(cls, fpath):
-        self = cls()
-        with open(fpath, 'rb') as f:
-            all_params = pickle.load(f)
-
-        # only non-param in dict
-        state_dict = all_params.pop('__state_dict')
-
-        # load (hyper-)parameters
-        self.set_params(**{k: v for k, v in all_params.items() if not k.endswith('_')})
-
-        # "fits"
-        for k, v in all_params.items():
-            if k.endswith('_'):
-                setattr(self, k, v)
-
-        # load weights
-        self._initialize_net_and_train_state(jnp.ones((self.n_data_points_,
-                                                       self.n_features_in_)))
-
-        self.train_state_ = from_state_dict(self.train_state_, state_dict)
-
-        self._compile_predict()
-
-        return self
+        return r

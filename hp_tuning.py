@@ -7,7 +7,7 @@ import optax
 from tqdm import tqdm
 
 from src.data import get_X_y, load_riser_data, split_curve
-from src.net import NetworkTrainer
+from src.net import NetworkTrainerWandB
 
 N_ITER = 100
 N_RUNS = 5
@@ -52,7 +52,7 @@ if __name__ == '__main__':
         train_results = list()
         start = time()
         for key in range(N_RUNS):
-            net = NetworkTrainer(
+            net = NetworkTrainerWandB(
                 **hps,
                 optimizer=optax.adam,
                 loss_fn=optax.l2_loss,

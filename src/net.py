@@ -12,6 +12,7 @@ from jax import value_and_grad, jit, vmap, nn, random
 from jax.random import PRNGKey
 from flax import linen as nn
 from flax.training.train_state import TrainState
+from flax.serialization import to_state_dict, from_state_dict
 
 
 class ReLUNetwork(nn.Module):
@@ -179,11 +180,28 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
         """
         X_, y_ = check_X_y(X, y, multi_output=True, y_numeric=True)
 
+        X_, y_, step, val_step = self._initialize(X_, y_, X_val, y_val, **kwargs)
+
+        self.train_loss_values_ = list()
+        self.val_loss_values_ = list()
+        best_val = jnp.inf
+        best_val_epoch = -1
+        for epoch in range(self.epochs):  # TRAINING LOOP
+            self._run_epoch(X_, y_, X_val, y_val, bandit, step, val_step,
+                            best_val, best_val_epoch, epoch)
+
+        self._finish_fit()
+
+        return self
+
+    def _initialize(self, X, y, X_val, y_val, **kwargs):
         if not (self.warm_start and hasattr(self, 'train_state_')):
-            self._fit_to_Xy_shape(X_, y_)
-            self._initialize_net_and_train_state(X_)
-        
-        X_, y_ = self._shuffle_data(X_, y_)
+            self._fit_to_Xy_shape(X, y)
+            self._initialize_net_and_train_state(X)
+        else:
+            raise NotImplementedError('warm-starting :(')
+
+        X, y = self._shuffle_data(X, y)
 
         self._maybe_init_wandb({k[len('wandb_'):]:v for k,v in kwargs.items()
                                 if k.startswith('wandb_')})
@@ -196,41 +214,41 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
         else:
             val_step = None
 
-        self.train_loss_values_ = list()
-        self.val_loss_values_ = list()
-        best_val = jnp.inf
-        best_val_epoch = -1
-        for epoch in range(self.epochs):  # TRAINING LOOP
+        return X, y, step, val_step
+
+    def _run_epoch(self, X_, y_, X_val, y_val, bandit, step, val_step, best_val,
+                   best_val_epoch, current_epoch):
+        self.train_state_, loss_value = step(self.train_state_, X_, y_)
+        self.train_loss_values_.append(loss_value)
+
+        epoch_log = {
+            'train_loss': loss_value,
+        }
+
+        if val_step is not None:
             val_loss_value = val_step(self.train_state_, X_val, y_val)
-            self.train_state_, loss_value = step(self.train_state_, X_, y_)
-            self.train_loss_values_.append(loss_value)
+            self.val_loss_values_.append(val_loss_value)
+            epoch_log['val_loss'] = val_loss_value
 
-            epoch_log = {
-                'train_state': self.train_state_,
-                'train_loss': loss_value,
-            }
-
-            if val_step is not None:
-                val_loss_value = val_step(self.train_state_, X_val, y_val)
-                self.val_loss_values_.append(val_loss_value)
-                epoch_log['val_loss'] = val_loss_value
-
-                if val_loss_value < 0.95 * best_val:
-                    best_val = val_loss_value
-                    best_val_epoch = epoch
-                elif epoch - best_val_epoch > bandit:
+            if val_loss_value < 0.95 * best_val:
+                best_val = val_loss_value
+                best_val_epoch = current_epoch
+            elif current_epoch - best_val_epoch > bandit:
                     # ugly way to ensure that _maybe_log_to_wandb runs one last
                     # time
-                    epoch = self.epochs + 1
+                current_epoch = self.epochs + 1
 
-            self._maybe_log_to_wandb(epoch_log)
+        self._maybe_log_to_wandb(epoch_log)
 
+    def _finish_fit(self):
+        self._compile_predict()
+
+        self._maybe_finish_wandb()
+
+    def _compile_predict(self):
         self._predict = jit(lambda x: self.train_state_.apply_fn(
             {'params': self.train_state_.params}, x
         ))
-        self._maybe_finish_wandb()
-
-        return self
 
     def _fit_to_Xy_shape(self, X, y):
         # initialize weights and biases
@@ -247,11 +265,12 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
 
         with open(fpath, 'wb') as f:
             pickle.dump(dict(
-                Wbs_=self.train_state_,
+                __state_dict=to_state_dict(self.train_state_),
                 input_range_=self.input_range_,
                 output_range_=self.output_range_,
                 train_loss_values_=self.train_loss_values_,
                 val_loss_values_=self.train_loss_values_,
+                n_data_points_=self.n_data_points_,
                 n_features_in_=self.n_features_in_,
                 n_features_out_=self.n_features_out_,
                 **self.get_params()
@@ -262,24 +281,24 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
         self = cls()
         with open(fpath, 'rb') as f:
             all_params = pickle.load(f)
-        # npzfile = jnp.load(fpath)
 
+        # only non-param in dict
+        state_dict = all_params.pop('__state_dict')
+
+        # load (hyper-)parameters
         self.set_params(**{k: v for k, v in all_params.items() if not k.endswith('_')})
 
-        # "fits" the model
-        self.train_state_ = all_params['Wbs_']
-        self.input_range_ = all_params['input_range_']
-        self.output_range_ = all_params['output_range_']
-        self.train_loss_values_ = all_params['train_loss_values_']
-        self.val_loss_values_ = all_params['val_loss_values_']
-        self.n_features_in_ = all_params['n_features_in_']
-        self.n_features_out_ = all_params['n_features_out_']
+        # "fits"
+        for k, v in all_params.items():
+            if k.endswith('_'):
+                setattr(self, k, v)
 
-        # compile prediction
-        self._predict = jit(vmap(lambda x: self._predict_from_params(
-            x, self.train_state_,
-            input_range=self.input_range_,
-            output_range=self.output_range_,
-        )))
+        # load weights
+        self._initialize_net_and_train_state(jnp.ones((self.n_data_points_,
+                                                       self.n_features_in_)))
+
+        self.train_state_ = from_state_dict(self.train_state_, state_dict)
+
+        self._compile_predict()
 
         return self

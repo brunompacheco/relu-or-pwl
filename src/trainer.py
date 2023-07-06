@@ -1,5 +1,6 @@
 import pickle
 import jax.numpy as jnp
+import numpy as np
 import optax
 import wandb
 
@@ -146,7 +147,7 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
             self._run_epoch(X_, y_, X_val, y_val, bandit, step, val_step,
                             best_val, best_val_epoch)
 
-        self._finish_fit()
+        self._finish_fit(X_val, y_val)
 
         return self
 
@@ -190,8 +191,15 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
 
         return loss_value, val_loss_value
 
-    def _finish_fit(self):
+    def _finish_fit(self, X, y):
         self._compile_predict()
+
+        if X is not None:
+            y_hat = self.predict(X)
+            percentage_error = (y_hat - y) / y
+
+            self.mape_ = np.abs(percentage_error).mean()
+            self.max_ape_ = np.abs(percentage_error).max()
 
     def _compile_predict(self):
         self._predict = jit(lambda x: self.train_state_.apply_fn(
@@ -278,6 +286,11 @@ class NetworkTrainerWandB(NetworkTrainer):
             self._wandb_run.save(tmp_file_fpath)
             # os.remove(tmp_file_fpath)
 
+            if hasattr(self, 'mape_'):
+                self._wandb_run.summary['MAPE'] = self.mape_
+            if hasattr(self, 'max_ape_'):
+                self._wandb_run.summary['MaxAPE'] = self.max_ape_
+
             # finish wandb
             self._wandb_run.finish()
         except AttributeError:
@@ -302,8 +315,8 @@ class NetworkTrainerWandB(NetworkTrainer):
 
         return loss_value, val_loss_value
 
-    def _finish_fit(self):
-        r = super()._finish_fit()
+    def _finish_fit(self, *args, **kwargs):
+        r = super()._finish_fit(*args, **kwargs)
 
         self._maybe_finish_wandb()
 

@@ -26,6 +26,7 @@ if __name__ == '__main__':
         'h_layers': [2, 5, 10, 20],
         'h_units': [20, 50, 200, 500],
         'learning_rate': [1e-2, 1e-3, 1e-4],
+        'weight_decay': [0., 1e-3, 1e-4, 1e-5],
     }
 
     # load data
@@ -54,7 +55,7 @@ if __name__ == '__main__':
         for key in range(N_RUNS):
             net = NetworkTrainerWandB(
                 **hps,
-                optimizer=optax.adam,
+                optimizer=optax.adamw,
                 loss_fn=optax.l2_loss,
                 epochs=EPOCHS,
                 random_key=key

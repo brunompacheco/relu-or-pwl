@@ -6,7 +6,8 @@ import wandb
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils import check_array, check_X_y
 from sklearn.utils.estimator_checks import check_is_fitted
-from jax import value_and_grad, jit, random
+from jax import grad, value_and_grad, jit, random
+from jax.tree_util import tree_leaves
 from jax.random import PRNGKey
 from flax.training.train_state import TrainState
 from flax.serialization import to_state_dict, from_state_dict
@@ -14,10 +15,13 @@ from flax.serialization import to_state_dict, from_state_dict
 from .net import ReLUNetwork
 
 
+def l2_reg(x, alpha):
+    return alpha * (x ** 2).mean()
+
 class NetworkTrainer(BaseEstimator,RegressorMixin):
-    def __init__(self, h_layers=3, h_units=20, optimizer=optax.adam,
+    def __init__(self, h_layers=3, h_units=20, optimizer=optax.adamw,
                  loss_fn=optax.l2_loss, epochs=100, learning_rate=1e-3,
-                 random_key=0, init_params_scale=1e-2,
+                 l2_reg_alpha=0., weight_decay=0., random_key=0, init_params_scale=1e-2,
                  warm_start=False) -> None:
         self.h_layers = h_layers
         self.h_units = h_units
@@ -27,6 +31,9 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
 
         self.epochs = epochs
         self.learning_rate = learning_rate
+
+        self.l2_reg_alpha = l2_reg_alpha
+        self.weight_decay = weight_decay
 
         self.init_params_scale = init_params_scale
 
@@ -49,7 +56,8 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
         Wbs = self.net_.init(key, X)  # weights and biases
 
         # initialize optimizer
-        optimizer = self.optimizer(learning_rate=self.learning_rate)
+        optimizer = self.optimizer(learning_rate=self.learning_rate,
+                                   weight_decay=self.weight_decay)
 
         self.train_state_ = TrainState.create(
             apply_fn=self.net_.apply,
@@ -83,14 +91,18 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
 
     def compile_training_step(self):
         def step(state: TrainState, inputs, targets):
-            def compute_mean_loss(params):
+            def compute_train_loss(params):
                 pred = state.apply_fn({'params': params}, inputs)
 
                 loss_value = self.loss_fn(pred, targets).sum(axis=-1)
 
+                # l2 regularization
+                loss_value += sum(l2_reg(w, alpha=self.l2_reg_alpha)
+                                  for w in tree_leaves(params))
+
                 return loss_value.mean()
 
-            loss_value, grads = value_and_grad(compute_mean_loss)(state.params)
+            loss_value, grads = value_and_grad(compute_train_loss)(state.params)
 
             state = state.apply_gradients(grads=grads)
 
@@ -101,19 +113,19 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
     def compile_validation_step(self):
         # TODO: refactor loss function to avoid double definition (validation
         # and training steps). Maybe compile using jit+partial
-        def compute_mean_loss(state: TrainState, inputs, targets):
+        def compute_val_loss(state: TrainState, inputs, targets):
             pred = state.apply_fn({'params': state.params}, inputs)
 
             loss_value = self.loss_fn(pred, targets).sum(axis=-1)
 
             return loss_value.mean()
 
-        return jit(compute_mean_loss)
+        return jit(compute_val_loss)
 
     def _shuffle_data(self, X, y):
         key = PRNGKey(self.random_key)
         idx = jnp.arange(X.shape[0])
-        shuffled_idx = random.shuffle(key, idx)
+        shuffled_idx = random.permutation(key, idx, independent=True)
 
         return X[shuffled_idx], y[shuffled_idx]
 

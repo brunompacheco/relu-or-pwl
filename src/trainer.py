@@ -109,14 +109,24 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
 
                 # numerical second derivative regularization
                 if self.l2_second_deriv_reg > 0:
-                    inputs_plus = inputs + self.eps_reg
-                    inputs_minus = inputs - self.eps_reg
+                    n_dim = inputs.shape[1]
+                    batch_size = inputs.shape[0]
 
-                    pred_plus = state.apply_fn({'params': params}, inputs_plus)
-                    pred_minus = state.apply_fn({'params': params}, inputs_minus)
+                    second_derivative_penalty = 0
+                    for i in range(n_dim):  # input dimensions
+                        # euclidean vector along i-th dimension
+                        e_i = jnp.eye(n_dim)[i][None,:].repeat(batch_size,0)
 
-                    second_derivative = (pred_plus - 2 * pred + pred_minus) / (2 * self.eps_reg)
-                    loss_value += self.l2_second_deriv_reg * jnp.sum(jnp.square(second_derivative))
+                        inputs_plus = inputs + self.eps_reg * e_i
+                        inputs_minus = inputs - self.eps_reg * e_i
+
+                        pred_plus = state.apply_fn({'params': params}, inputs_plus)
+                        pred_minus = state.apply_fn({'params': params}, inputs_minus)
+
+                        second_derivative = (pred_plus - 2 * pred + pred_minus) / (2 * self.eps_reg)
+                        second_derivative_penalty += jnp.sum(jnp.square(second_derivative)) / n_dim
+
+                    loss_value += self.l2_second_deriv_reg * second_derivative_penalty
 
                 return loss_value
 

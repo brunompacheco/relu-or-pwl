@@ -17,13 +17,14 @@ from .net import ReLUNetwork
 
 
 def l2_reg(x, alpha):
-    return alpha * (x ** 2).mean()
+    return alpha * jnp.mean(jnp.square(x))
 
 class NetworkTrainer(BaseEstimator,RegressorMixin):
     def __init__(self, h_layers=3, h_units=20, optimizer=optax.adamw,
                  loss_fn=optax.l2_loss, epochs=100, learning_rate=1e-3,
-                 l2_reg_alpha=0., weight_decay=0., random_key=0, init_params_scale=1e-2,
-                 warm_start=False) -> None:
+                 l2_reg_alpha=0., weight_decay=0., random_key=0,
+                 init_params_scale=1e-2, warm_start=False, l2_reg=0.01,
+                 l2_second_deriv_reg=0, eps_reg=1e-3) -> None:
         self.h_layers = h_layers
         self.h_units = h_units
 
@@ -41,6 +42,10 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
         self.random_key = random_key
 
         self.warm_start = warm_start
+
+        self.l2_reg = l2_reg
+        self.l2_second_deriv_reg = l2_second_deriv_reg
+        self.eps_reg = eps_reg
 
     def _initialize_net_and_train_state(self, X):
         key = PRNGKey(self.random_key)
@@ -95,13 +100,25 @@ class NetworkTrainer(BaseEstimator,RegressorMixin):
             def compute_train_loss(params):
                 pred = state.apply_fn({'params': params}, inputs)
 
-                loss_value = self.loss_fn(pred, targets).sum(axis=-1)
+                loss_value = self.loss_fn(pred, targets).sum(axis=-1).mean()
 
                 # l2 regularization
-                loss_value += sum(l2_reg(w, alpha=self.l2_reg_alpha)
-                                  for w in tree_leaves(params))
+                if self.l2_reg_alpha > 0:
+                    loss_value += jnp.mean(l2_reg(w, alpha=self.l2_reg_alpha)
+                                        for w in tree_leaves(params))
 
-                return loss_value.mean()
+                # numerical second derivative regularization
+                if self.l2_second_deriv_reg > 0:
+                    inputs_plus = inputs + self.eps_reg
+                    inputs_minus = inputs - self.eps_reg
+
+                    pred_plus = state.apply_fn({'params': params}, inputs_plus)
+                    pred_minus = state.apply_fn({'params': params}, inputs_minus)
+
+                    second_derivative = (pred_plus - 2 * pred + pred_minus) / (2 * self.eps_reg)
+                    loss_value += self.l2_second_deriv_reg * jnp.sum(jnp.square(second_derivative))
+
+                return loss_value
 
             loss_value, grads = value_and_grad(compute_train_loss)(state.params)
 
